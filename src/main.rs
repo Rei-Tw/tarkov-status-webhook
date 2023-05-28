@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt};
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use reqwest;
+use reqwest::{self, header::AUTHORIZATION};
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
 use tokio::time;
@@ -23,9 +23,9 @@ enum EventType {
 impl fmt::Display for EventType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            EventType::UpdateInstallation => write!(f, "Update installation"),
-            EventType::ServerIssues => write!(f, "Server issues"),
-            _ => write!(f, "Unknown event"),
+            EventType::UpdateInstallation => write!(f, "Installation de mise à jour"),
+            EventType::ServerIssues => write!(f, "Problèmes de serveur"),
+            _ => write!(f, "Inconnu"),
         }
     }
 }
@@ -42,6 +42,46 @@ struct Event {
     solve_time: Option<DateTime<Utc>>,
 }
 
+#[derive(Deserialize, Debug)]
+struct Translation {
+    text: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct DeeplResponse {
+    translations: Vec<Translation>,
+}
+
+// todo: do this better :v)
+const DEEPL_API_KEY: &'static str = "API_KEY";
+
+// This function will attempt to translate. On fail it'll just return the same content, untranslated.
+async fn try_translate(reqwest_client: &reqwest::Client, text: &String) -> String {
+    let params = [("text", text.as_str()), ("target_lang", "FR")];
+
+    match reqwest_client
+        .post("https://api-free.deepl.com/v2/translate")
+        .form(&params)
+        .header(AUTHORIZATION, format!("DeepL-Auth-Key {DEEPL_API_KEY}"))
+        .send()
+        .await
+    {
+        Ok(resp) => match resp.error_for_status() {
+            Ok(resp) => {
+                let deepl_resp: DeeplResponse = resp.json().await.unwrap();
+                if deepl_resp.translations.len() > 0 {
+                    return deepl_resp.translations.get(0).unwrap().text.clone();
+                }
+            }
+            Err(e) => error!("Deepl API returned error: {e}"),
+        },
+        Err(e) => error!("Unexpected error has occured while contacting Deepl API: {e}"),
+    }
+
+    text.clone()
+}
+
+// todo: do this better :v)
 const WEBHOOK_URL: &'static str = "url";
 
 #[tokio::main]
@@ -83,6 +123,8 @@ async fn main() -> Result<()> {
                 }
             }
 
+            let translated_content = try_translate(&reqwest_client, &event.content).await;
+
             let resp = webhook_client
                 .send(|message: &mut webhook::models::Message| {
                     message
@@ -94,26 +136,26 @@ async fn main() -> Result<()> {
                                 .thumbnail(
                                     "https://www.escapefromtarkov.com/themes/eft/images/logo.png",
                                 )
-                                .description(event.content.as_str())
+                                .description(translated_content.as_str())
                                 .url("https://status.escapefromtarkov.com");
 
                             // tweak some params if solved
                             if let Some(solve_time) = event.solve_time {
                                 embed
                                     .field(
-                                        "Solved at",
+                                        "Résolu depuis",
                                         format!("<t:{}:R>", solve_time.timestamp()).as_str(),
                                         true,
                                     )
                                     .color("65280");
 
-                                embed.field("Status", "Issue resolved :white_check_mark:", false);
+                                embed.field("Status", "Résolu :white_check_mark:", false);
 
                             // or not
                             } else {
                                 embed
                                     .field(
-                                        "Since",
+                                        "Depuis",
                                         format!("<t:{}:R>", event.time.timestamp()).as_str(),
                                         true,
                                     )
@@ -121,7 +163,7 @@ async fn main() -> Result<()> {
 
                                 embed.field(
                                     "Status",
-                                    "Offline :negative_squared_cross_mark:",
+                                    "Hors ligne :negative_squared_cross_mark:",
                                     false,
                                 );
                             }
